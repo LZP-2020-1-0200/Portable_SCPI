@@ -1,10 +1,12 @@
 #include <Arduino.h>
-
+#include <ArduinoJson.h>
 #include <ESP8266WiFi.h>
 #include <time.h>      // time() ctime()
 #include <sys/time.h>  // struct timeval
 #include <coredecls.h> // settimeofday_cb()
 #include <LTC2942.h>
+
+#include <ESP8266HTTPClient.h>
 
 timeval cbtime; // time set in callback
 bool cbtime_set = false;
@@ -28,7 +30,9 @@ void onWiFiEventStationModeGotIP(const WiFiEventStationModeGotIP &evt)
 
 const unsigned int fullCapacity = 240; // Maximum value is 5500 mAh
 
-LTC2942 gauge(50); // Takes R_SENSE value (in milliohms) as constructor argument, can be omitted if using LTC2942-1
+LTC2942 gauge(100); // Takes R_SENSE value (in milliohms) as constructor argument, can be omitted if using LTC2942-1
+
+int uptime = -1;
 
 void setup()
 {
@@ -66,6 +70,20 @@ void setup()
 
 timeval tv;
 
+// HTTPClient http;
+// WiFiClient client;
+
+#define TMP_SERVER_JSON_BUF_LEN 2000
+uint8_t tmp_server_json_buf[TMP_SERVER_JSON_BUF_LEN + 1] = {0};
+const char *jskSystem = "system";
+const char *jskUptime = "uptime";
+const char *jskTimestamp = "timestamp";
+const char *jskRSSI = "RSSI";
+const char *jskLTC2942 = "LTC2942";
+const char *jskTemperature = "temperature";
+const char *jskVoltage = "voltage";
+const char *jskSample_n = "sample_n";
+
 void loop()
 {
   gettimeofday(&tv, nullptr);
@@ -74,6 +92,7 @@ void loop()
   if (lastv != tv.tv_sec)
   {
     lastv = tv.tv_sec;
+    uptime++;
     //    Serial.print(tv.tv_sec);
     //    Serial.print("\t");
     //    Serial.print(ctime(&tv.tv_sec));
@@ -121,6 +140,57 @@ void loop()
       else
       {
         Serial.println(F("Not supported by LTC2941"));
+      }
+
+      if ((WiFi.status() == WL_CONNECTED))
+      {
+        HTTPClient http;
+        WiFiClient client;
+        http.begin(client, "http://192.168.5.35"); // HTTP
+        http.addHeader("Content-Type", "application/json");
+
+        Serial.print("[HTTP] POST...\n");
+        // start connection and send HTTP header and body
+
+        const int capacity = JSON_OBJECT_SIZE(100);
+        StaticJsonDocument<capacity> doc;
+
+        JsonObject jso_system = doc.createNestedObject(jskSystem);
+        jso_system[jskUptime] = uptime;
+        jso_system[jskTimestamp] = tv.tv_sec;
+        jso_system[jskRSSI] = WiFi.RSSI();
+        static int sample_n = 0;
+        jso_system[jskSample_n] = sample_n++;
+
+        JsonObject jso_LTC2942 = doc.createNestedObject(jskLTC2942);
+        jso_LTC2942[jskTemperature] = temperature;
+        jso_LTC2942[jskVoltage] = voltage;
+
+        size_t n_bytes = serializeJson(doc, tmp_server_json_buf, TMP_SERVER_JSON_BUF_LEN);
+
+        int httpCode = http.POST(tmp_server_json_buf, n_bytes);
+
+        // httpCode will be negative on error
+        if (httpCode > 0)
+        {
+          // HTTP header has been send and Server response header has been handled
+          Serial.printf("[HTTP] POST... code: %d\n", httpCode);
+
+          // file found at server
+          if (httpCode == HTTP_CODE_OK)
+          {
+            const String &payload = http.getString();
+            Serial.println("received payload:\n<<");
+            Serial.println(payload);
+            Serial.println(">>");
+          }
+        }
+        else
+        {
+          Serial.printf("[HTTP] POST... failed, error: %s\n", http.errorToString(httpCode).c_str());
+        }
+
+        http.end();
       }
 
       Serial.println();
